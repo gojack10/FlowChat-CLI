@@ -1,3 +1,4 @@
 *.md
 *.bak
 +README.md
+.env
