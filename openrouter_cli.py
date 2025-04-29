@@ -275,7 +275,12 @@ while True:
                             tool_output = json.dumps({"error": "missing required argument: content"})
                         else:
                             # determine lexer based on suggested path extension
-                            lexer = Syntax.guess_lexer(llm_suggested_path, default="text")
+                            # lexer = Syntax.guess_lexer(llm_suggested_path, default="text") # Error: default is not a valid arg
+                            try:
+                                # guess_lexer might raise ClassNotFound if no lexer is found
+                                lexer = Syntax.guess_lexer(llm_suggested_path)
+                            except Exception: # Catch potential errors from pygments
+                                lexer = "text" # fallback to plain text
                             console.print(Panel(Syntax(content, lexer=lexer, theme="monokai", line_numbers=True), title="File Content", border_style="blue"))
                             
                             # --- Path Confirmation --- 
