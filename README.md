@@ -1,4 +1,4 @@
-# OpenRouter CLI
+# FlowChat CLI
 
 A simple command-line interface to interact with OpenRouter LLMs, featuring streaming, conversation history, token tracking, file writing via Tool Calling, and enhanced UI with `rich`.
 
