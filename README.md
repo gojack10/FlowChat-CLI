@@ -7,7 +7,7 @@ A simple command-line interface to interact with OpenRouter LLMs, featuring stre
 *   Interactive chat with conversation history.
 *   Streaming responses.
 *   Loads API key from `.env` file.
-*   `/add_context <path>` command to load file content into the chat.
+*   `!add_context [<path>]` command to load file or folder content into the chat (prompts for confirmation with token count).
 *   Token usage estimation (`tiktoken`).
 *   File writing capability via LLM Tool Calling (with user confirmation).
 *   Interactive file path selection using `fzf` (optional) via `!browse` command during file write confirmation.
@@ -39,7 +39,9 @@ python openrouter_cli.py
 ```
 
 *   Chat normally.
-*   Use `/add_context <path>` or `/add_context` (which opens interactive selector) to add file content.
+*   Use `!add_context <path>` to add a specific file or folder.
+*   Use `!add_context` (with no path) to open an interactive selector (`fzf` if installed) to choose a file or folder.
+*   The script will estimate the tokens and ask for confirmation before adding the context.
 *   When asked to write a file, the script will display the content and prompt for path confirmation:
     *   **LLM Suggestion:** Shows the path the LLM suggested.
     *   **Enter Path:** You can type a full path (e.g., `/path/to/your/file.txt`) or a path relative to the current directory (e.g., `my_folder/file.py`). Tilde `~` is expanded.

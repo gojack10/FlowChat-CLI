@@ -101,7 +101,7 @@ def estimate_prompt_tokens(messages):
     num_tokens += 2
     return num_tokens
 
-console.print(Panel(f"Starting chat with [bold cyan]{MODEL}[/]. Type [bold]'/add_context <path>'[/], [bold]'exit'[/], or [bold]'quit'[/].", title="Welcome", border_style="green"))
+console.print(Panel(f"Starting chat with {MODEL}. Type [bold]'!add_context [<path>]'[/], [bold]'exit'[/], or [bold]'quit'[/].", title="Welcome", border_style="green"))
 console.print("--- ")
 
 while True:
@@ -113,64 +113,108 @@ while True:
             break
 
         # check for special commands
-        if user_input.lower().startswith("/add_context"):
-            file_path_arg = user_input[len("/add_context"):].strip()
-            selected_context_path = None
+        if user_input.lower().startswith("!add_context"):
+            command_part = "!add_context"
+            file_path_arg = user_input[len(command_part):].strip()
+            selected_path_for_context = None
 
             if not file_path_arg:
                 # no path provided, use the browser
-                console.print("[yellow]Launching interactive path selector for context file...[/yellow]")
+                console.print("[yellow]Launching interactive path selector for context...[/yellow]")
                 try:
                     helper_script = "./select_path.sh"
                     if not os.path.exists(helper_script):
-                         raise FileNotFoundError("select_path.sh not found in current directory.")
+                         raise FileNotFoundError("select_path.sh not found")
                     if not os.access(helper_script, os.X_OK):
-                         raise PermissionError("select_path.sh is not executable (run chmod +x select_path.sh)")
-
+                         raise PermissionError("select_path.sh not executable")
+                         
                     process = subprocess.run([helper_script], capture_output=True, text=True, check=False)
 
                     if process.returncode != 0:
-                        console.print(f"[red]Error running path selector script:[/red]")
-                        console.print(f"[dim]Stderr: {process.stderr}[/dim]")
+                         console.print(f"[red]Error running path selector script:[/red] [dim]{process.stderr}[/dim]")
                     else:
                         selected_path_output = process.stdout.strip()
                         if selected_path_output:
-                            # check if the selected path is a file
-                            if os.path.isfile(selected_path_output):
-                                selected_context_path = selected_path_output
-                                console.print(f"Selected context file: [cyan]{selected_context_path}[/cyan]")
-                            else:
-                                console.print(f"[red]Error:[/red] Selected path '[cyan]{selected_path_output}[/cyan]' is not a file.")
+                             selected_path_for_context = selected_path_output # store selected path (file or dir)
+                             console.print(f"Selected path: [cyan]{selected_path_for_context}[/cyan]")
                         else:
                             console.print("[yellow]No path selected or selection cancelled.[/yellow]")
-
+                
                 except FileNotFoundError as e:
-                    console.print(f"[bold red]Error:[/bold red] {e}")
+                     console.print(f"[bold red]Error:[/bold red] {e}")
                 except PermissionError as e:
                      console.print(f"[bold red]Error:[/bold red] {e}")
                 except Exception as e:
                     console.print(f"[bold red]Error running browse script:[/bold red] {e}")
             else:
-                # path provided directly, use existing logic
+                # path provided directly
                 expanded_direct_path = os.path.expanduser(file_path_arg)
-                if os.path.isfile(expanded_direct_path):
-                     selected_context_path = expanded_direct_path
+                if os.path.exists(expanded_direct_path): # check if path exists
+                     selected_path_for_context = expanded_direct_path
                 else:
-                    console.print(f"[bold red]Error:[/bold red] Provided path '[cyan]{expanded_direct_path}[/cyan]' is not a valid file.")
+                    console.print(f"[bold red]Error:[/bold red] Provided path '[cyan]{expanded_direct_path}[/cyan]' does not exist.")
 
-            # if we have a valid file path (either selected or provided)
-            if selected_context_path:
+            # --- process selected path (file or folder) --- 
+            if selected_path_for_context:
+                combined_content = ""
+                context_source_description = ""
+                content_items_count = 0
+                
                 try:
-                    with open(selected_context_path, 'r') as f:
-                        context_content = f.read()
-                    context_msg = f"Context from {os.path.basename(selected_context_path)}:\n\n{context_content}"
-                    history.append({"role": "user", "content": context_msg})
-                    prompt_tokens_est = estimate_prompt_tokens(history)
-                    console.print(f"[dim]Added context from {selected_context_path}. Estimated prompt tokens: ~{prompt_tokens_est}[/dim]")
+                    if os.path.isfile(selected_path_for_context):
+                        # it's a file
+                        context_source_description = f"file: {os.path.basename(selected_path_for_context)}"
+                        with open(selected_path_for_context, 'r', errors='ignore') as f: # ignore decoding errors for simplicity
+                            combined_content = f.read()
+                        content_items_count = 1
+                            
+                    elif os.path.isdir(selected_path_for_context):
+                        # it's a directory
+                        context_source_description = f"folder: {os.path.basename(selected_path_for_context)}"
+                        content_parts = []
+                        # walk through the directory recursively
+                        for root, dirs, files in os.walk(selected_path_for_context):
+                            # skip hidden files/dirs? (optional)
+                            files = [f for f in files if not f.startswith('.')]
+                            dirs[:] = [d for d in dirs if not d.startswith('.')]
+                            
+                            for filename in files:
+                                file_path = os.path.join(root, filename)
+                                relative_path = os.path.relpath(file_path, selected_path_for_context)
+                                try:
+                                    with open(file_path, 'r', errors='ignore') as f:
+                                        content = f.read()
+                                        content_parts.append(f"### File: {relative_path}\n\n{content}\n\n---\n")
+                                        content_items_count += 1
+                                except Exception as e:
+                                    console.print(f"[yellow]Warning: Could not read file {file_path}: {e}[/yellow]")
+                        combined_content = "".join(content_parts)
+                    else:
+                         console.print(f"[red]Error:[/red] Path '[cyan]{selected_path_for_context}[/cyan]' is neither a file nor a directory.")
+                         combined_content = None # Signal error
+
+                    # --- Confirmation Step --- 
+                    if combined_content is not None and combined_content.strip():
+                        estimated_context_tokens = estimate_tokens(combined_content)
+                        confirm = console.input(
+                            f"Add context from {context_source_description} ({content_items_count} item(s), approx. [bold yellow]{estimated_context_tokens}[/bold yellow] tokens)? (y/N): "
+                        ).lower()
+                        
+                        if confirm == 'y':
+                            # Format the message clearly indicating source
+                            context_msg = f"Context from {context_source_description}:\n\n{combined_content}"
+                            history.append({"role": "user", "content": context_msg})
+                            prompt_tokens_est = estimate_prompt_tokens(history)
+                            console.print(f"[dim]Added context. Total prompt tokens: ~{prompt_tokens_est}[/dim]")
+                        else:
+                            console.print("[yellow]Context adding cancelled by user.[/yellow]")
+                    elif combined_content is not None: # path was valid but content was empty
+                         console.print("[yellow]Selected source contains no readable text content. Context not added.[/yellow]")
+                         
                 except Exception as e:
-                    console.print(f"[bold red]Error reading context file {selected_context_path}:[/bold red] {e}")
+                    console.print(f"[bold red]Error processing context path {selected_path_for_context}:[/bold red] {e}")
             
-            continue # continue loop whether context was added or error occurred
+            continue # continue main loop after handling context command
 
         # append user message to history
         history.append({"role": "user", "content": user_input})
