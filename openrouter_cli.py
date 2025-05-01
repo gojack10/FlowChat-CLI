@@ -267,7 +267,7 @@ def main():
             prompt_tokens = estimate_prompt_tokens(history)
             console.print(f"[dim](Prompt Tokens: ~{prompt_tokens})[/dim]")
 
-            console.print(f"[bold blue]Assistant:[/bold blue] ", end="")
+            console.print(f"[bold blue]TARS:[/bold blue] ", end="")
 
             response = client.chat.completions.create(
                 model=MODEL,
