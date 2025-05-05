@@ -6,6 +6,7 @@ import traceback
 import pty
 import select
 import re
+import shutil
 
 from openai import OpenAI, OpenAIError
 from dotenv import load_dotenv
@@ -18,13 +19,156 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import PathCompleter, Completer, Completion
 from prompt_toolkit.key_binding import KeyBindings
 
+# --- fzf check ---
+def check_fzf():
+    """checks if fzf is installed and executable."""
+    return shutil.which("fzf")
+
+# --- end fzf check ---
+
+# --- FZF Path Completer ---
+class FzfPathCompleter:
+    """Handles path completion by running fzf externally and updating the buffer."""
+
+    def run_fzf_and_update_buffer(self, event):
+        """Runs fzf and directly updates the prompt_toolkit buffer."""
+        global fzf_path
+        buffer = event.cli.current_buffer
+        if not fzf_path:
+            # maybe add a visual bell or temp message?
+            print("\n[fzf completer] fzf not found.", file=sys.stderr)
+            return
+
+        document = buffer.document
+        text_before_cursor = document.text_before_cursor
+        original_cursor_position = document.cursor_position
+
+        # determine search directory and initial query for fzf
+        search_dir = "."
+        fzf_query = ""
+        path_fragment_len = 0 # how much of the original text represents the path fragment
+
+        if text_before_cursor:
+            # expand ~ manually first
+            if text_before_cursor.startswith("~/"):
+                 base_path = os.path.expanduser(text_before_cursor)
+                 is_tilde_path = True
+            else:
+                 base_path = text_before_cursor
+                 is_tilde_path = False
+
+            # check if it looks like a path
+            if '/' in base_path:
+                 potential_dir = os.path.dirname(base_path)
+                 if os.path.isdir(potential_dir):
+                      search_dir = potential_dir
+                      fzf_query = os.path.basename(base_path)
+                      path_fragment_len = len(text_before_cursor) # whole thing is path
+                 elif not potential_dir and is_tilde_path: # edge case: just "~/"
+                      search_dir = os.path.expanduser("~")
+                      fzf_query = ""
+                      path_fragment_len = len(text_before_cursor)
+                 elif not potential_dir: # input is likely just a filename part relative to cwd
+                      search_dir = "."
+                      fzf_query = base_path
+                      path_fragment_len = len(text_before_cursor)
+                 else: # dirname doesn't exist, treat as query in cwd
+                    search_dir = "."
+                    fzf_query = base_path
+                    path_fragment_len = len(text_before_cursor)
+            else:
+                 # assume it's just a filename part in the current dir
+                 search_dir = "."
+                 fzf_query = text_before_cursor
+                 path_fragment_len = len(text_before_cursor)
+        else:
+             # no text, search current dir
+             search_dir = "."
+             fzf_query = ""
+             path_fragment_len = 0
+
+        # ensure search_dir is valid before proceeding
+        if not os.path.isdir(search_dir):
+             print(f"\n[fzf completer] search dir '{search_dir}' not found.", file=sys.stderr)
+             return
+
+        # construct the command pipeline: find | fzf
+        # use find to list files/dirs, pipe to fzf
+        # -maxdepth 1 to avoid excessive recursion initially?
+        # use portable -print
+        # escaping search_dir just in case it has spaces/special chars
+        find_cmd = ["find", search_dir, "-maxdepth", "1", "-mindepth", "1", "-print"]
+        # Add hidden file filtering? Maybe later.
+        fzf_cmd = [fzf_path, "--height=40%", "--layout=reverse", "--border", "--query", fzf_query]
+
+        selected_path_full = None
+        try:
+            # run find, capture its output
+            find_process = subprocess.run(find_cmd, capture_output=True, text=True, check=False)
+            if find_process.returncode != 0 and find_process.stderr:
+                if "permission denied" not in find_process.stderr.lower():
+                    print(f"\n[fzf completer] find error: {find_process.stderr.strip()}", file=sys.stderr)
+                find_output = ""
+            else:
+                find_output = find_process.stdout
+
+            # run fzf, passing find's output as stdin
+            # crucial: run fzf without capturing output directly, let it interact with terminal
+            # we need to temporarily give control to fzf
+            # THIS IS COMPLEX - using subprocess.run directly might not work well for interactive fzf
+            # A better approach might involve pty or direct terminal manipulation
+
+            # --- Simplified approach for now: capture output --- >>>> TODO: REVISIT THIS
+            fzf_process = subprocess.run(fzf_cmd, input=find_output, capture_output=True, text=True, check=False) # allow non-zero exit for cancellation
+
+            if fzf_process.returncode == 0: # successful selection
+                 selected_path_raw = fzf_process.stdout.strip()
+                 if selected_path_raw: # ensure selection is not empty
+                      # fzf output using find -print gives full path from find's start dir
+                      selected_path_full = selected_path_raw
+            elif fzf_process.returncode == 130: # cancelled
+                 # print(f"\n[fzf completer] fzf cancelled by user.") # debug - removed
+                 selected_path_full = None # ensure no path is set
+                 # reset renderer even on cancellation to fix terminal state
+                 event.cli.renderer.reset()
+            else: # other error
+                 print(f"\n[fzf completer] fzf error (code {fzf_process.returncode}): {fzf_process.stderr}", file=sys.stderr)
+                 selected_path_full = None
+
+            # --- End Simplified approach --- #
+
+        except FileNotFoundError:
+            print(f"\n[fzf completer] Error: {fzf_path} or find command not found.", file=sys.stderr)
+        except Exception as e:
+             print(f"\n[fzf completer] Unexpected error during fzf execution: {e}", file=sys.stderr)
+             traceback.print_exc()
+
+        # update buffer only if fzf returned a valid path
+        if selected_path_full is not None:
+            # determine the text to insert
+            completion_text = selected_path_full
+            # append a space if it's a directory for convenience
+            if os.path.isdir(selected_path_full):
+                 completion_text += "/"
+
+            # calculate start position relative to current cursor
+            # we need to delete the part of the text that was used as the query
+            buffer.delete_before_cursor(path_fragment_len)
+            buffer.insert_text(completion_text)
+            # explicitly invalidate/request redraw after update
+            # event.app.invalidate()
+            # try a more forceful redraw
+            event.cli.renderer.reset()
+
+# --- End FZF Path Completer ---
+
 # --- Tilde Workaround Completer ---
 class TildeWorkaroundCompleter(Completer):
-    """Wraps PathCompleter to manually handle '~/...' paths because
-       the default expanduser=True isn't working reliably here.
+    """wraps pathcompleter to manually handle '~/...' paths because
+       the default expanduser=true isn't working reliably here.
     """
     def __init__(self):
-        # Underlying completer for non-'~/...' cases
+        # underlying completer for non-'~/...' cases
         self.path_completer = PathCompleter()
 
     def get_completions(self, document, complete_event):
@@ -33,7 +177,7 @@ class TildeWorkaroundCompleter(Completer):
         if text_before_cursor.startswith('~/'):
             try:
                 home_dir = os.path.expanduser('~')
-                path_fragment = text_before_cursor[2:] # Part after '~/'
+                path_fragment = text_before_cursor[2:] # part after '~/'
                 full_path_prefix = os.path.join(home_dir, path_fragment)
                 dir_to_list = home_dir
                 partial_item = path_fragment
@@ -61,25 +205,27 @@ class TildeWorkaroundCompleter(Completer):
                                 display_meta='manual'
                             )
             except Exception:
-                pass # Ignore errors during manual completion
+                pass # ignore errors during manual completion
         else:
-            # Delegate to the standard PathCompleter
+            # delegate to the standard pathcompleter
             try:
                 yield from self.path_completer.get_completions(document, complete_event)
             except Exception:
-                pass # Ignore errors during standard completion
+                pass # ignore errors during standard completion
 # --- End Tilde Workaround Completer ---
 
 console = Console()
-path_completer = TildeWorkaroundCompleter()
+fzf_completer = FzfPathCompleter()
 
 # set up explicit key bindings
 kb = KeyBindings()
 
 # @kb.add('c-i') # Tab binding - keep commented out unless needed again
-# def _(event):
-#     """force completion on tab."""
-#     event.cli.current_buffer.start_completion(select_first=False)
+@kb.add('c-i') # tab binding
+def _(event):
+    """force completion on tab."""
+    # this should now trigger our FzfPathCompleter directly
+    fzf_completer.run_fzf_and_update_buffer(event)
 
 @kb.add('escape', eager=True)
 def _(event):
@@ -107,7 +253,15 @@ def _(event):
         pass # or implement other escape behavior if desired
 
 # Pass the TildeWorkaroundCompleter and other settings
-session = PromptSession(completer=path_completer, complete_while_typing=False, key_bindings=kb)
+session = PromptSession(complete_while_typing=False, key_bindings=kb)
+
+# --- check fzf installation ---
+fzf_path = check_fzf()
+if not fzf_path:
+    console.print("[bold red]Error:[/bold red] `fzf` command not found in PATH. FZF-based autocompletion will be disabled.")
+    # we might set a flag here later to disable the fzf completer
+    # for now, just printing the error is sufficient for task 1
+# --- end check ---
 
 load_dotenv()
 
@@ -454,7 +608,7 @@ def main():
                                     f"Enter the correct full path, type [bold yellow]!browse[/bold yellow] to select interactively, or leave blank to use suggestion: "
                                 )
                                 console.print(prompt_display_text, end="")
-                                user_path_input = session.prompt("", completer=path_completer).strip()
+                                user_path_input = session.prompt("").strip()
 
                                 final_path = llm_suggested_path
 
@@ -499,7 +653,7 @@ def main():
                                     suggested_filename = os.path.basename(llm_suggested_path) if llm_suggested_path and not os.path.isdir(llm_suggested_path) else "new_file.txt"
                                     filename_prompt_text = f"Enter filename to save inside this directory (default: '[yellow]{suggested_filename}[/yellow]'): "
                                     console.print(prompt_display_text, end="")
-                                    filename = session.prompt("", completer=path_completer).strip()
+                                    filename = session.prompt("").strip()
                                     if not filename:
                                         filename = suggested_filename
                                     path_to_write = os.path.join(expanded_path, filename)
