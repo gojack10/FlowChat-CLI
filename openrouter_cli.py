@@ -86,12 +86,25 @@ def _(event):
     """close completion menu on escape."""
     if event.cli.current_buffer.complete_state:
         event.cli.current_buffer.cancel_completion()
-        # Request redraw after cancelling to potentially speed up UI update
-        event.cli.renderer.request_redraw()
+        # --- debug ---
+        # print the type and available attributes of the renderer object
+        # print(f"\\n--- DEBUG ---")
+        # try:
+        #     print(f"type(event.cli.renderer) = {type(event.cli.renderer)}")
+        #     print(f"dir(event.cli.renderer) = {dir(event.cli.renderer)}")
+        # except Exception as e:
+        #     print(f"error inspecting renderer: {e}")
+        # print(f"--- END DEBUG ---")
+        # --- end debug ---
+        # request redraw after cancelling to potentially speed up ui update
+        # event.cli.renderer.request_redraw() # original error line
+        # print("\\n redraw requested (commented out)") # placeholder
+        # attempt a different way to redraw if needed after debugging
+        event.app.invalidate() # use invalidate() on the application object
     else:
-        # Default escape action if not completing (e.g., clear input?)
-        # Or just pass to potentially let other bindings handle it.
-        pass # Or implement other escape behavior if desired
+        # default escape action if not completing (e.g., clear input?)
+        # or just pass to potentially let other bindings handle it.
+        pass # or implement other escape behavior if desired
 
 # Pass the TildeWorkaroundCompleter and other settings
 session = PromptSession(completer=path_completer, complete_while_typing=False, key_bindings=kb)
