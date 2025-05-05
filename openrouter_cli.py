@@ -14,9 +14,87 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
-from prompt_toolkit import prompt
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import PathCompleter, Completer, Completion
+from prompt_toolkit.key_binding import KeyBindings
+
+# --- Tilde Workaround Completer ---
+class TildeWorkaroundCompleter(Completer):
+    """Wraps PathCompleter to manually handle '~/...' paths because
+       the default expanduser=True isn't working reliably here.
+    """
+    def __init__(self):
+        # Underlying completer for non-'~/...' cases
+        self.path_completer = PathCompleter()
+
+    def get_completions(self, document, complete_event):
+        text_before_cursor = document.text_before_cursor
+
+        if text_before_cursor.startswith('~/'):
+            try:
+                home_dir = os.path.expanduser('~')
+                path_fragment = text_before_cursor[2:] # Part after '~/'
+                full_path_prefix = os.path.join(home_dir, path_fragment)
+                dir_to_list = home_dir
+                partial_item = path_fragment
+
+                if os.path.sep in path_fragment:
+                    dir_to_list = os.path.dirname(full_path_prefix)
+                    partial_item = os.path.basename(full_path_prefix)
+
+                if os.path.isdir(dir_to_list):
+                    for item in os.listdir(dir_to_list):
+                        if item.lower().startswith(partial_item.lower()):
+                            full_item_path = os.path.join(dir_to_list, item)
+                            completion_suffix = item
+                            display_suffix = item
+                            if os.path.isdir(full_item_path):
+                                display_suffix += os.path.sep
+                                completion_suffix += os.path.sep
+
+                            start_pos = -len(partial_item)
+
+                            yield Completion(
+                                text=completion_suffix,
+                                start_position=start_pos,
+                                display='~/ ' + path_fragment[:-len(partial_item)] + display_suffix,
+                                display_meta='manual'
+                            )
+            except Exception:
+                pass # Ignore errors during manual completion
+        else:
+            # Delegate to the standard PathCompleter
+            try:
+                yield from self.path_completer.get_completions(document, complete_event)
+            except Exception:
+                pass # Ignore errors during standard completion
+# --- End Tilde Workaround Completer ---
 
 console = Console()
+path_completer = TildeWorkaroundCompleter()
+
+# set up explicit key bindings
+kb = KeyBindings()
+
+# @kb.add('c-i') # Tab binding - keep commented out unless needed again
+# def _(event):
+#     """force completion on tab."""
+#     event.cli.current_buffer.start_completion(select_first=False)
+
+@kb.add('escape', eager=True)
+def _(event):
+    """close completion menu on escape."""
+    if event.cli.current_buffer.complete_state:
+        event.cli.current_buffer.cancel_completion()
+        # Request redraw after cancelling to potentially speed up UI update
+        event.cli.renderer.request_redraw()
+    else:
+        # Default escape action if not completing (e.g., clear input?)
+        # Or just pass to potentially let other bindings handle it.
+        pass # Or implement other escape behavior if desired
+
+# Pass the TildeWorkaroundCompleter and other settings
+session = PromptSession(completer=path_completer, complete_while_typing=False, key_bindings=kb)
 
 load_dotenv()
 
@@ -171,7 +249,7 @@ def main():
 
     while True:
         try:
-            user_input = prompt("You: ")
+            user_input = session.prompt("You: ")
 
             if user_input.lower() in ["exit", "quit"]:
                 console.print("[yellow]Exiting chat.[/yellow]")
@@ -243,7 +321,7 @@ def main():
 
                         if combined_content is not None and combined_content.strip():
                             estimated_context_tokens = estimate_tokens(combined_content)
-                            confirm = prompt(
+                            confirm = session.prompt(
                                 f"Add context from {context_source_description} ({content_items_count} item(s), approx. {estimated_context_tokens} tokens)? (y/N): "
                             ).lower()
 
@@ -362,8 +440,8 @@ def main():
                                     f"LLM suggested path: '[cyan]{llm_suggested_path}[/cyan]'\n"
                                     f"Enter the correct full path, type [bold yellow]!browse[/bold yellow] to select interactively, or leave blank to use suggestion: "
                                 )
-                                console.print(Markdown(prompt_display_text), end="")
-                                user_path_input = prompt("").strip()
+                                console.print(prompt_display_text, end="")
+                                user_path_input = session.prompt("", completer=path_completer).strip()
 
                                 final_path = llm_suggested_path
 
@@ -383,7 +461,6 @@ def main():
                                             console.print(f"Selected path: [cyan]{final_path}[/cyan]")
                                         else:
                                             console.print("[yellow]No path selected or selection cancelled.[/yellow]")
-                                            final_path = None
 
                                 elif user_path_input:
                                     final_path = user_path_input
@@ -408,8 +485,8 @@ def main():
                                     console.print(f"Target '[cyan]{expanded_path}[/cyan]' is a directory.")
                                     suggested_filename = os.path.basename(llm_suggested_path) if llm_suggested_path and not os.path.isdir(llm_suggested_path) else "new_file.txt"
                                     filename_prompt_text = f"Enter filename to save inside this directory (default: '[yellow]{suggested_filename}[/yellow]'): "
-                                    console.print(Markdown(filename_prompt_text), end="")
-                                    filename = prompt("").strip()
+                                    console.print(prompt_display_text, end="")
+                                    filename = session.prompt("", completer=path_completer).strip()
                                     if not filename:
                                         filename = suggested_filename
                                     path_to_write = os.path.join(expanded_path, filename)
@@ -427,8 +504,8 @@ def main():
 
                                 if path_to_write:
                                     confirm_prompt_text = f"{write_mode_description} (y/N): "
-                                    console.print(Markdown(confirm_prompt_text), end="")
-                                    confirm = prompt("").lower()
+                                    console.print(prompt_display_text, end="")
+                                    confirm = session.prompt("").lower()
 
                                     if confirm == 'y':
                                         try:
